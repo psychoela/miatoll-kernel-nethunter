@@ -34,7 +34,7 @@ on:
       build_host:
         description: "Nama host dalam banner kernel (user@host)"
         required: true
-        default: "Github"
+        default: "github"
 
 jobs:
   build:
