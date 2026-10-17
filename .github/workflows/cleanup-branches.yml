@@ -1,0 +1,62 @@
+name: cleanup-branches
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: "Branch yang dikekalkan (mesti sama dengan branch default)"
+        required: true
+        default: "sigma-357"
+      confirm:
+        description: "Taip PADAM (huruf besar) untuk sahkan"
+        required: true
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  clean:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Semakan keselamatan
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          KEEP: ${{ inputs.keep }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$CONFIRM" != "PADAM" ]; then
+            echo "Tidak disahkan. Taip PADAM dalam medan confirm."
+            exit 1
+          fi
+          if [ "$KEEP" != "$DEFAULT" ]; then
+            echo "Branch default ialah '$DEFAULT', bukan '$KEEP'. Tukar branch default dahulu."
+            exit 1
+          fi
+          echo "Branch dikekalkan: $KEEP"
+
+      - name: Padam semua branch lain
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: ${{ inputs.keep }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/branches" --paginate -q '.[].name' > branches.txt
+          echo "=== Senarai branch sekarang ==="
+          cat branches.txt
+          echo "=== Memadam ==="
+          while IFS= read -r b; do
+            [ -z "$b" ] && continue
+            if [ "$b" = "$KEEP" ]; then
+              echo "KEKAL: $b"
+              continue
+            fi
+            if gh api -X DELETE "repos/$REPO/git/refs/heads/$b" > /dev/null 2>&1; then
+              echo "PADAM: $b"
+            else
+              echo "GAGAL: $b"
+            fi
+          done < branches.txt
+          echo "=== Selesai ==="
+          gh api "repos/$REPO/branches" --paginate -q '.[].name'
+          
