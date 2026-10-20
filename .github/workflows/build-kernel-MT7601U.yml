@@ -77,6 +77,7 @@ jobs:
           export KBUILD_BUILD_HOST="$BHOST"
           export KBUILD_BUILD_VERSION="$BNUM"
           ARGS="O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          sed -i '/^[[:space:]]*select MT7601U[[:space:]]*$/d' nethunter/Kconfig
           make $ARGS ${{ inputs.defconfig }}
           scripts/config --file out/.config -e MODULES -e MODULE_UNLOAD -d MODULE_SIG_FORCE -e MAC80211 -e WLAN_VENDOR_MEDIATEK -m MT7601U -d LLVM_POLLY
           scripts/config --file out/.config --set-str LOCALVERSION "-${KNAME}-${KVER}-${KSUFFIX}"
