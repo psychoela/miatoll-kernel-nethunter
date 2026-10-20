@@ -81,6 +81,11 @@ jobs:
           scripts/config --file out/.config -e MODULES -e MODULE_UNLOAD -d MODULE_SIG_FORCE -e MAC80211 -e WLAN_VENDOR_MEDIATEK -m MT7601U -d LLVM_POLLY
           scripts/config --file out/.config --set-str LOCALVERSION "-${KNAME}-${KVER}-${KSUFFIX}"
           make $ARGS olddefconfig
+          echo "=== Diagnosis MT7601U ==="
+          grep -n "MT7601U" out/.config || true
+          sed -n '1,12p' drivers/net/wireless/mediatek/mt7601u/Kconfig
+          grep -rn "select MT7601U\|imply MT7601U" --include='Kconfig*' . || echo "tiada select/imply"
+          grep -rn "MT7601U" arch/arm64/configs/ || echo "tiada rujukan dalam defconfig"
           echo "=== Semakan config ==="
           grep -E "CONFIG_MODULES=|CONFIG_MODULE_UNLOAD=|CONFIG_MODULE_SIG_FORCE|CONFIG_CFG80211=|CONFIG_MAC80211=|CONFIG_WLAN_VENDOR_MEDIATEK=|CONFIG_MT7601U=|CONFIG_LOCALVERSION=" out/.config
           grep -q "CONFIG_MAC80211=y" out/.config
@@ -125,4 +130,5 @@ jobs:
           name: kernel-flashable
           path: dist/
           if-no-files-found: error
+
           
