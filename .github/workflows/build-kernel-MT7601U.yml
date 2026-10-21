@@ -1,168 +1,172 @@
-name: build-sigma-357
+name: firmware-module
 
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: "Branch untuk dibina"
+      module_version:
+        description: "Versi modul (contoh 1.0)"
         required: true
-        default: "sigma-357"
-      defconfig:
-        description: "Defconfig (path relatif dari arch/arm64/configs)"
-        required: true
-        default: "vendor/xiaomi/miatoll_defconfig"
-      kernel_name:
-        description: "Nama kernel (huruf, nombor, titik, sempang sahaja)"
-        required: true
-        default: "SigmaPhantom"
-      kernel_version:
-        description: "Versi kernel (contoh r1.0)"
-        required: true
-        default: "r1.0"
-      kernel_suffix:
-        description: "Akhiran nama (lalai guna # lebar penuh; # biasa tidak dibenarkan)"
-        required: true
-        default: "＃NetHunter"
-      build_number:
-        description: "Nombor binaan selepas # dalam banner (contoh 1)"
-        required: true
-        default: "1"
-      build_user:
-        description: "Nama pembina dalam banner kernel (user@host)"
-        required: true
-        default: "PsychoAvy"
-      build_host:
-        description: "Nama host dalam banner kernel (user@host)"
-        required: true
-        default: "github"
+        default: "1.0"
 
 jobs:
-  build:
+  pack:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.branch }}
-
-      - name: Pasang kebergantungan
+      - name: Ambil linux-firmware
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev libelf-dev cpio zip python3 git ccache libarchive-tools
-
-      - name: Setup ccache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.ccache
-            out/.ccache
-          key: ${{ runner.os }}-ccache-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-ccache-
-
-      - name: Toolchain (Proton clang, sesuai untuk kernel 4.14)
-        run: git clone --depth=1 https://github.com/kdrag0n/proton-clang $HOME/clang
-
-      - name: Build kernel
-        env:
-          KNAME: ${{ inputs.kernel_name }}
-          KVER: ${{ inputs.kernel_version }}
-          KSUFFIX: ${{ inputs.kernel_suffix }}
-          BNUM: ${{ inputs.build_number }}
-          BUSER: ${{ inputs.build_user }}
-          BHOST: ${{ inputs.build_host }}
-        run: |
-          case "$KSUFFIX" in
-            ""|*[\#\"\'\\\$\`\ ]*)
-              echo "Akhiran tidak sah: jangan guna # biasa, petikan, \\, \$, backtick atau ruang"
-              exit 1;;
-          esac
-          for v in "$KNAME" "$KVER" "$BNUM" "$BUSER" "$BHOST"; do
-            if ! echo "$v" | grep -Eq '^[A-Za-z0-9._-]+$'; then
-              echo "Aksara tidak dibenarkan dalam: $v (guna huruf, nombor, titik, sempang sahaja; tanpa #)"
-              exit 1
+          for U in https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git \
+                   https://gitlab.com/kernel-firmware/linux-firmware.git; do
+            if git clone --depth=1 "$U" fw; then
+              echo "$U" > fw.url
+              break
             fi
+            rm -rf fw
           done
-          export PATH=$HOME/clang/bin:$PATH
-          export KBUILD_BUILD_USER="$BUSER"
-          export KBUILD_BUILD_HOST="$BHOST"
-          export KBUILD_BUILD_VERSION="$BNUM"
-          
-          ARGS="O=out ARCH=arm64 CC=ccache clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
-          
-          sed -i '/^[[:space:]]*select MT7601U[[:space:]]*$/d' nethunter/Kconfig
-          make $ARGS ${{ inputs.defconfig }}
-          
-          # Konfigurasi modul: MT7601U (sedia ada) + MT76 core dan MT76X2U (untuk MT7612U)
-          scripts/config --file out/.config -e MODULES -e MODULE_UNLOAD -d MODULE_SIG_FORCE -e MAC80211 -e WLAN_VENDOR_MEDIATEK -m MT7601U -m MT76_CORE -m MT76X2U -m MT76X2_COMMON -d LLVM_POLLY
-          
-          scripts/config --file out/.config --set-str LOCALVERSION "-${KNAME}-${KVER}-${KSUFFIX}"
-          make $ARGS olddefconfig
-          
-          echo "=== Diagnosis Wireless Modules ==="
-          grep -E "CONFIG_MT7601U=|CONFIG_MT76X2U=|CONFIG_MT76_CORE=" out/.config
-          
-          make -k -j$(nproc) $ARGS
-          make -j$(nproc) $ARGS modules
-          
-          # Pastikan fail modul terhasil
-          find out -name mt7601u.ko | grep -q . || { echo "mt7601u.ko tidak terhasil"; exit 1; }
-          find out -name mt76x2u.ko | grep -q . || { echo "mt76x2u.ko tidak terhasil"; exit 1; }
+          test -d fw
+          git -C fw log -1 --format='linux-firmware commit: %h (%ci)'
+          echo "=== Rujukan WHENCE untuk fail lama ==="
+          grep -n -i -E 'rt2570|zd1211' fw/WHENCE | head -20 || true
 
-      - name: Pack zip flash (AnyKernel3)
+      - name: Susun modul Magisk
         env:
-          KNAME: ${{ inputs.kernel_name }}
-          KVER: ${{ inputs.kernel_version }}
-          KSUFFIX: ${{ inputs.kernel_suffix }}
-          BUSER: ${{ inputs.build_user }}
-          BHOST: ${{ inputs.build_host }}
+          MVER: ${{ inputs.module_version }}
         run: |
-          SUB=$(grep -E '^SUBLEVEL = ' Makefile | awk '{print $3}')
-          NAME="${KNAME}-${KVER}-4_14_${SUB}-miatoll"
-          
-          echo "=== Semak nama dalam Image ==="
-          grep -a -o -m1 "Linux version 4\.14\.[0-9]*-[A-Za-z0-9._-]*" out/arch/arm64/boot/Image
-          grep -aq "${KNAME}-${KVER}-${KSUFFIX} (${BUSER}@${BHOST})" out/arch/arm64/boot/Image
-          
-          rm -rf ak && mkdir ak
-          unzip -q anykernel-template.zip -d ak
-          
-          sed -i "s|^kernel.string=.*|kernel.string=${KNAME} ${KVER} by ${BUSER} (MT7601U & MT7612U Support)|" ak/anykernel.sh
-          grep '^kernel.string=' ak/anykernel.sh
-          
-          cp out/arch/arm64/boot/Image ak/Image
-          cp out/arch/arm64/boot/dtb.img ak/dtb
-          cp out/arch/arm64/boot/dtbo.img ak/dtbo.img
-          
-          # Masukkan modul kernel (.ko) ke dalam AnyKernel3
-          mkdir -p ak/modules/system/lib/modules
-          find out -name "mt7601u.ko" -o -name "mt76x2u.ko" -o -name "mt76_core.ko" -o -name "mt76.ko" | while read -r mod; do
-            if [ -f "$mod" ]; then
-              cp "$mod" ak/modules/system/lib/modules/
-            fi
-          done
-          
-          # Salin fail firmware MT7612U (pastikan anda sudah letakkan fail mt7662u.bin dalam folder firmware/ di repo anda)
-          mkdir -p ak/modules/system/vendor/firmware
-          if [ -f "firmware/mt7662u.bin" ]; then
-            cp firmware/mt7662u.bin ak/modules/system/vendor/firmware/
-          else
-            echo "Amaran: Fail firmware firmware/mt7662u.bin tidak dijumpai di dalam repo!"
+          set -u
+          if ! echo "$MVER" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+            echo "Versi tidak sah"; exit 1
           fi
-          
+          FWURL=$(cat fw.url)
+          D=module/system/vendor/firmware
+          mkdir -p "$D" module/META-INF/com/google/android
+
+          # cp_fw <sumber (relatif fw/)> <nama di /vendor/firmware> [nama kedua]
+          cp_fw() {
+            src="fw/$1"
+            if [ ! -f "$src" ]; then echo "TIADA: $1"; return 1; fi
+            shift
+            for dst in "$@"; do
+              mkdir -p "$D/$(dirname "$dst")"
+              cp "$src" "$D/$dst"
+            done
+          }
+
+          # Klon sejarah (tanpa kandungan fail) sekali sahaja, untuk fail yang telah dibuang
+          ensure_history() {
+            [ -d fwfull ] || git clone -q --filter=blob:none --no-checkout "$FWURL" fwfull
+          }
+
+          # get_legacy <nama fail> <nama di /vendor/firmware>
+          get_legacy() {
+            name="$1"; dst="$2"
+            p=$(find fw -path fw/.git -prune -o -type f -name "$name" -print | head -1)
+            if [ -n "$p" ]; then
+              mkdir -p "$D/$(dirname "$dst")"; cp "$p" "$D/$dst"
+              echo "dijumpai: $p"; return 0
+            fi
+            ensure_history
+            out=$(git -C fwfull log -1 --diff-filter=D --name-only --format=%H -- ":(glob)**/$name" | grep -v '^$' || true)
+            c=$(echo "$out" | sed -n 1p); f=$(echo "$out" | sed -n 2p)
+            if [ -n "$c" ] && [ -n "$f" ] && git -C fwfull cat-file -e "$c^:$f" 2>/dev/null; then
+              mkdir -p "$D/$(dirname "$dst")"
+              git -C fwfull show "$c^:$f" > "$D/$dst"
+              echo "dipulihkan dari sejarah: $f (sebelum commit ${c:0:8})"; return 0
+            fi
+            echo "TIADA (juga dalam sejarah): $name"; return 1
+          }
+
+          # get_legacy_dir <awalan nama fail, cth zd1211> <folder sasaran>
+          get_legacy_dir() {
+            prefix="$1"; target="$2"
+            found=$(find fw -path fw/.git -prune -o -type f -name "${prefix}*" -print)
+            if [ -n "$found" ]; then
+              mkdir -p "$D/$target"
+              echo "$found" | while IFS= read -r p; do cp "$p" "$D/$target/$(basename "$p")"; done
+              echo "dijumpai dalam pokok semasa: $(echo "$found" | wc -l) fail"; return 0
+            fi
+            ensure_history
+            out=$(git -C fwfull log -1 --diff-filter=D --name-only --format=%H -- ":(glob)**/${prefix}*" | grep -v '^$' || true)
+            c=$(echo "$out" | sed -n 1p)
+            if [ -n "$c" ]; then
+              mkdir -p "$D/$target"
+              echo "$out" | sed 1d | while IFS= read -r f; do
+                case "$(basename "$f")" in ${prefix}*) git -C fwfull show "$c^:$f" > "$D/$target/$(basename "$f")";; esac
+              done
+              echo "dipulihkan dari sejarah (sebelum commit ${c:0:8})"; return 0
+            fi
+            echo "TIADA (juga dalam sejarah): ${prefix}*"; return 1
+          }
+
+          echo "=== ath9k_htc (AR9271, AR7010) ==="
+          cp_fw ath9k_htc/htc_9271-1.4.0.fw htc_9271.fw ath9k_htc/htc_9271-1.4.0.fw \
+            || cp_fw htc_9271.fw htc_9271.fw || true
+          cp_fw ath9k_htc/htc_7010-1.4.0.fw htc_7010.fw ath9k_htc/htc_7010-1.4.0.fw \
+            || cp_fw htc_7010.fw htc_7010.fw || true
+
+          echo "=== carl9170 ==="
+          cp_fw carl9170-1.fw carl9170-1.fw || true
+
+          echo "=== rt2800usb, rt73usb ==="
+          cp_fw rt2870.bin rt2870.bin || true
+          cp_fw rt73.bin rt73.bin || true
+
+          echo "=== rt2500usb (rt2570.bin) ==="
+          get_legacy rt2570.bin rt2570.bin || true
+
+          echo "=== rtlwifi USB (RTL8188/8192CU) dan rtl8xxxu ==="
+          for f in fw/rtlwifi/rtl8192cufw*.bin fw/rtlwifi/rtl8723aufw*.bin \
+                   fw/rtlwifi/rtl8192eu_nic.bin fw/rtlwifi/rtl8723bu_nic.bin \
+                   fw/rtlwifi/rtl8188eufw.bin; do
+            [ -f "$f" ] && cp_fw "${f#fw/}" "${f#fw/}"
+          done
+
+          echo "=== zd1211rw ==="
+          get_legacy_dir zd1211 zd1211 || true
+
+          echo "=== mt7601u ==="
+          cp_fw mediatek/mt7601u.bin mt7601u.bin mediatek/mt7601u.bin \
+            || cp_fw mt7601u.bin mt7601u.bin || true
+
+          echo "=== mt7612u (mt7662u.bin / mt7662.bin) ==="
+          cp_fw mediatek/mt7662u.bin mt7662u.bin mediatek/mt7662u.bin || \
+          cp_fw mediatek/mt7662.bin mt7662.bin mediatek/mt7662.bin || \
+          cp_fw mt7662u.bin mt7662u.bin || \
+          cp_fw mt7662.bin mt7662.bin || echo "AMARAN: Firmware MT7612U (mt7662u.bin) tidak dijumpai dalam repo linux-firmware"
+
+          echo "=== Semak fail wajib ==="
+          miss=0
+          for need in htc_9271.fw carl9170-1.fw rt2870.bin rt73.bin mt7601u.bin; do
+            if [ ! -s "$D/$need" ]; then echo "WAJIB TIADA: $need"; miss=1; fi
+          done
+          ls "$D"/rtlwifi/rtl8192cufw*.bin > /dev/null 2>&1 || { echo "WAJIB TIADA: rtlwifi/rtl8192cufw*.bin"; miss=1; }
+          [ "$miss" = 0 ] || exit 1
+          [ -s "$D/rt2570.bin" ] || echo "AMARAN: rt2570.bin tiada (adapter RT2500USB tidak akan berfungsi)"
+          ls "$D"/zd1211/zd1211* > /dev/null 2>&1 || echo "AMARAN: firmware zd1211 tiada (adapter ZD1211 tidak akan berfungsi)"
+
+          cat > module/module.prop <<PROP
+          id=usb-wifi-firmware
+          name=USB WiFi Firmware (SigmaPhantom)
+          version=v${MVER}
+          versionCode=${GITHUB_RUN_NUMBER:-1}
+          author=PsychoAvy
+          description=Firmware untuk adapter WiFi USB: MT7601U, MT7612U, AR9271/AR7010 (ath9k_htc), AR9170 (carl9170), RT2800/RT73/RT2500, RTL8188/8192CU, ZD1211.
+          PROP
+          sed -i 's/^ *//' module/module.prop
+
+          curl -fsSL https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/module_installer.sh \
+            -o module/META-INF/com/google/android/update-binary
+          echo "#MAGISK" > module/META-INF/com/google/android/updater-script
+
           mkdir -p dist
-          (cd ak && zip -q -r -9 ../dist/$NAME.zip . -x '.*')
-          cp out/.config dist/config.txt
-          
-          # Salin modul untuk semakan luaran jika perlu
-          cp "$(find out -name mt7601u.ko | head -n1)" dist/mt7601u.ko || true
-          cp "$(find out -name mt76x2u.ko | head -n1)" dist/mt76x2u.ko || true
-          
+          (cd module && zip -q -r -9 ../dist/usb-wifi-firmware-v${MVER}.zip . -x '.*')
+          (cd "$D" && find . -type f -printf '%P  %s bait\n' | sort) > dist/senarai-firmware.txt
+          echo "=== Isi modul ==="
+          cat dist/senarai-firmware.txt
           ls -l dist
 
-      - name: Muat naik hasil
+      - name: Muat naik modul
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-flashable
+          name: usb-wifi-firmware
           path: dist/
           if-no-files-found: error
           
