@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       module_version:
-        description: "Versi modul (contoh 1.0)"
+        description: "Module version (e.g. 1.0)"
         required: true
         default: "1.0"
 
@@ -12,7 +12,7 @@ jobs:
   pack:
     runs-on: ubuntu-22.04
     steps:
-      - name: Ambil linux-firmware
+      - name: Fetch linux-firmware
         run: |
           for U in https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git \
                    https://gitlab.com/kernel-firmware/linux-firmware.git; do
@@ -24,25 +24,25 @@ jobs:
           done
           test -d fw
           git -C fw log -1 --format='linux-firmware commit: %h (%ci)'
-          echo "=== Rujukan WHENCE untuk fail lama ==="
+          echo "=== WHENCE references for legacy files ==="
           grep -n -i -E 'rt2570|zd1211' fw/WHENCE | head -20 || true
 
-      - name: Susun modul Magisk
+      - name: Build Magisk Module
         env:
           MVER: ${{ inputs.module_version }}
         run: |
           set -u
           if ! echo "$MVER" | grep -Eq '^[A-Za-z0-9._-]+$'; then
-            echo "Versi tidak sah"; exit 1
+            echo "Invalid version format"; exit 1
           fi
           FWURL=$(cat fw.url)
           D=module/system/vendor/firmware
           mkdir -p "$D" module/META-INF/com/google/android
 
-          # cp_fw <sumber (relatif fw/)> <nama di /vendor/firmware> [nama kedua]
+          # cp_fw <source (relative to fw/)> <target in /vendor/firmware> [secondary target]
           cp_fw() {
             src="fw/$1"
-            if [ ! -f "$src" ]; then echo "TIADA: $1"; return 1; fi
+            if [ ! -f "$src" ]; then echo "MISSING: $1"; return 1; fi
             shift
             for dst in "$@"; do
               mkdir -p "$D/$(dirname "$dst")"
@@ -50,19 +50,18 @@ jobs:
             done
           }
 
-          # Klon sejarah (tanpa kandungan fail) sekali sahaja, untuk fail yang telah dibuang
+          # Clone full history (blobless) once for removed legacy files
           ensure_history() {
             [ -d fwfull ] || git clone -q --filter=blob:none --no-checkout "$FWURL" fwfull
           }
 
-          # get_legacy <nama fail> <nama di /vendor/firmware>
-          # 1) cari mana-mana dalam pokok semasa  2) cari dalam sejarah git (fail yang telah dibuang)
+          # get_legacy <file_name> <target in /vendor/firmware>
           get_legacy() {
             name="$1"; dst="$2"
             p=$(find fw -path fw/.git -prune -o -type f -name "$name" -print | head -1)
             if [ -n "$p" ]; then
               mkdir -p "$D/$(dirname "$dst")"; cp "$p" "$D/$dst"
-              echo "dijumpai: $p"; return 0
+              echo "Found: $p"; return 0
             fi
             ensure_history
             out=$(git -C fwfull log -1 --diff-filter=D --name-only --format=%H -- ":(glob)**/$name" | grep -v '^$' || true)
@@ -70,19 +69,19 @@ jobs:
             if [ -n "$c" ] && [ -n "$f" ] && git -C fwfull cat-file -e "$c^:$f" 2>/dev/null; then
               mkdir -p "$D/$(dirname "$dst")"
               git -C fwfull show "$c^:$f" > "$D/$dst"
-              echo "dipulihkan dari sejarah: $f (sebelum commit ${c:0:8})"; return 0
+              echo "Restored from git history: $f (prior to commit ${c:0:8})"; return 0
             fi
-            echo "TIADA (juga dalam sejarah): $name"; return 1
+            echo "MISSING (also in history): $name"; return 1
           }
 
-          # get_legacy_dir <awalan nama fail, cth zd1211> <folder sasaran>
+          # get_legacy_dir <file_prefix, e.g. zd1211> <target_folder>
           get_legacy_dir() {
             prefix="$1"; target="$2"
             found=$(find fw -path fw/.git -prune -o -type f -name "${prefix}*" -print)
             if [ -n "$found" ]; then
               mkdir -p "$D/$target"
               echo "$found" | while IFS= read -r p; do cp "$p" "$D/$target/$(basename "$p")"; done
-              echo "dijumpai dalam pokok semasa: $(echo "$found" | wc -l) fail"; return 0
+              echo "Found in current tree: $(echo "$found" | wc -l) files"; return 0
             fi
             ensure_history
             out=$(git -C fwfull log -1 --diff-filter=D --name-only --format=%H -- ":(glob)**/${prefix}*" | grep -v '^$' || true)
@@ -92,9 +91,9 @@ jobs:
               echo "$out" | sed 1d | while IFS= read -r f; do
                 case "$(basename "$f")" in ${prefix}*) git -C fwfull show "$c^:$f" > "$D/$target/$(basename "$f")";; esac
               done
-              echo "dipulihkan dari sejarah (sebelum commit ${c:0:8})"; return 0
+              echo "Restored from history (prior to commit ${c:0:8})"; return 0
             fi
-            echo "TIADA (juga dalam sejarah): ${prefix}*"; return 1
+            echo "MISSING (also in history): ${prefix}*"; return 1
           }
 
           echo "=== ath9k_htc (AR9271, AR7010) ==="
@@ -113,7 +112,7 @@ jobs:
           echo "=== rt2500usb (rt2570.bin) ==="
           get_legacy rt2570.bin rt2570.bin || true
 
-          echo "=== rtlwifi USB (RTL8188/8192CU) dan rtl8xxxu ==="
+          echo "=== rtlwifi USB (RTL8188/8192CU) and rtl8xxxu ==="
           for f in fw/rtlwifi/rtl8192cufw*.bin fw/rtlwifi/rtl8723aufw*.bin \
                    fw/rtlwifi/rtl8192eu_nic.bin fw/rtlwifi/rtl8723bu_nic.bin \
                    fw/rtlwifi/rtl8188eufw.bin; do
@@ -127,15 +126,21 @@ jobs:
           cp_fw mediatek/mt7601u.bin mt7601u.bin mediatek/mt7601u.bin \
             || cp_fw mt7601u.bin mt7601u.bin || true
 
-          echo "=== Semak fail wajib ==="
+          echo "=== mt7612u (mt7662u.bin / mt7662.bin) ==="
+          cp_fw mediatek/mt7662u.bin mt7662u.bin mediatek/mt7662u.bin || \
+          cp_fw mediatek/mt7662.bin mt7662.bin mediatek/mt7662.bin || \
+          cp_fw mt7662u.bin mt7662u.bin || \
+          cp_fw mt7662.bin mt7662.bin || echo "WARNING: MT7612U firmware (mt7662u.bin) not found in linux-firmware repo"
+
+          echo "=== Checking required firmware files ==="
           miss=0
           for need in htc_9271.fw carl9170-1.fw rt2870.bin rt73.bin mt7601u.bin; do
-            if [ ! -s "$D/$need" ]; then echo "WAJIB TIADA: $need"; miss=1; fi
+            if [ ! -s "$D/$need" ]; then echo "REQUIRED MISSING: $need"; miss=1; fi
           done
-          ls "$D"/rtlwifi/rtl8192cufw*.bin > /dev/null 2>&1 || { echo "WAJIB TIADA: rtlwifi/rtl8192cufw*.bin"; miss=1; }
+          ls "$D"/rtlwifi/rtl8192cufw*.bin > /dev/null 2>&1 || { echo "REQUIRED MISSING: rtlwifi/rtl8192cufw*.bin"; miss=1; }
           [ "$miss" = 0 ] || exit 1
-          [ -s "$D/rt2570.bin" ] || echo "AMARAN: rt2570.bin tiada (adapter RT2500USB tidak akan berfungsi)"
-          ls "$D"/zd1211/zd1211* > /dev/null 2>&1 || echo "AMARAN: firmware zd1211 tiada (adapter ZD1211 tidak akan berfungsi)"
+          [ -s "$D/rt2570.bin" ] || echo "WARNING: rt2570.bin missing (RT2500USB adapter won't work)"
+          ls "$D"/zd1211/zd1211* > /dev/null 2>&1 || echo "WARNING: zd1211 firmware missing (ZD1211 adapter won't work)"
 
           cat > module/module.prop <<PROP
           id=usb-wifi-firmware
@@ -143,7 +148,7 @@ jobs:
           version=v${MVER}
           versionCode=${GITHUB_RUN_NUMBER:-1}
           author=PsychoAvy
-          description=Firmware untuk adapter WiFi USB: MT7601U, AR9271/AR7010 (ath9k_htc), AR9170 (carl9170), RT2800/RT73/RT2500, RTL8188/8192CU, ZD1211.
+          description=Firmware for USB WiFi Adapters: MT7601U, MT7612U, AR9271/AR7010 (ath9k_htc), AR9170 (carl9170), RT2800/RT73/RT2500, RTL8188/8192CU, ZD1211.
           PROP
           sed -i 's/^ *//' module/module.prop
 
@@ -153,14 +158,15 @@ jobs:
 
           mkdir -p dist
           (cd module && zip -q -r -9 ../dist/usb-wifi-firmware-v${MVER}.zip . -x '.*')
-          (cd "$D" && find . -type f -printf '%P  %s bait\n' | sort) > dist/senarai-firmware.txt
-          echo "=== Isi modul ==="
-          cat dist/senarai-firmware.txt
+          (cd "$D" && find . -type f -printf '%P  %s bytes\n' | sort) > dist/firmware-list.txt
+          echo "=== Module Content ==="
+          cat dist/firmware-list.txt
           ls -l dist
 
-      - name: Muat naik modul
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: usb-wifi-firmware
           path: dist/
           if-no-files-found: error
+          
