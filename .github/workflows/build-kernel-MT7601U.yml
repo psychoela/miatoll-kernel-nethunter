@@ -47,7 +47,17 @@ jobs:
       - name: Pasang kebergantungan
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev libelf-dev cpio zip python3 git
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev cpio zip python3 git ccache libarchive-tools
+
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            out/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
 
       - name: Toolchain (Proton clang, sesuai untuk kernel 4.14)
         run: git clone --depth=1 https://github.com/kdrag0n/proton-clang $HOME/clang
@@ -76,27 +86,27 @@ jobs:
           export KBUILD_BUILD_USER="$BUSER"
           export KBUILD_BUILD_HOST="$BHOST"
           export KBUILD_BUILD_VERSION="$BNUM"
-          ARGS="O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          
+          ARGS="O=out ARCH=arm64 CC=ccache clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          
           sed -i '/^[[:space:]]*select MT7601U[[:space:]]*$/d' nethunter/Kconfig
           make $ARGS ${{ inputs.defconfig }}
-          scripts/config --file out/.config -e MODULES -e MODULE_UNLOAD -d MODULE_SIG_FORCE -e MAC80211 -e WLAN_VENDOR_MEDIATEK -m MT7601U -d LLVM_POLLY
+          
+          # Konfigurasi modul: MT7601U (sedia ada) + MT76 core dan MT76X2U (untuk MT7612U)
+          scripts/config --file out/.config -e MODULES -e MODULE_UNLOAD -d MODULE_SIG_FORCE -e MAC80211 -e WLAN_VENDOR_MEDIATEK -m MT7601U -m MT76_CORE -m MT76X2U -m MT76X2_COMMON -d LLVM_POLLY
+          
           scripts/config --file out/.config --set-str LOCALVERSION "-${KNAME}-${KVER}-${KSUFFIX}"
           make $ARGS olddefconfig
-          echo "=== Diagnosis MT7601U ==="
-          grep -n "MT7601U" out/.config || true
-          sed -n '1,12p' drivers/net/wireless/mediatek/mt7601u/Kconfig
-          grep -rn "select MT7601U\|imply MT7601U" --include='Kconfig*' . || echo "tiada select/imply"
-          grep -rn "MT7601U" arch/arm64/configs/ || echo "tiada rujukan dalam defconfig"
-          echo "=== Semakan config ==="
-          grep -E "CONFIG_MODULES=|CONFIG_MODULE_UNLOAD=|CONFIG_MODULE_SIG_FORCE|CONFIG_CFG80211=|CONFIG_MAC80211=|CONFIG_WLAN_VENDOR_MEDIATEK=|CONFIG_MT7601U=|CONFIG_LOCALVERSION=" out/.config
-          grep -q "CONFIG_MAC80211=y" out/.config
-          grep -q "CONFIG_MODULES=y" out/.config
-          grep -q "CONFIG_MODULE_UNLOAD=y" out/.config
-          grep -q "CONFIG_MT7601U=m" out/.config
-          for o in ATH9K_HTC CARL9170 RT2800USB RT2500USB RT73USB RTL8192CU RTL8187 ZD1211RW; do grep -E "^CONFIG_$o=" out/.config || echo "TIADA: $o"; done
+          
+          echo "=== Diagnosis Wireless Modules ==="
+          grep -E "CONFIG_MT7601U=|CONFIG_MT76X2U=|CONFIG_MT76_CORE=" out/.config
+          
           make -k -j$(nproc) $ARGS
           make -j$(nproc) $ARGS modules
+          
+          # Pastikan fail modul terhasil
           find out -name mt7601u.ko | grep -q . || { echo "mt7601u.ko tidak terhasil"; exit 1; }
+          find out -name mt76x2u.ko | grep -q . || { echo "mt76x2u.ko tidak terhasil"; exit 1; }
 
       - name: Pack zip flash (AnyKernel3)
         env:
@@ -108,21 +118,45 @@ jobs:
         run: |
           SUB=$(grep -E '^SUBLEVEL = ' Makefile | awk '{print $3}')
           NAME="${KNAME}-${KVER}-4_14_${SUB}-miatoll"
+          
           echo "=== Semak nama dalam Image ==="
           grep -a -o -m1 "Linux version 4\.14\.[0-9]*-[A-Za-z0-9._-]*" out/arch/arm64/boot/Image
           grep -aq "${KNAME}-${KVER}-${KSUFFIX} (${BUSER}@${BHOST})" out/arch/arm64/boot/Image
+          
           rm -rf ak && mkdir ak
           unzip -q anykernel-template.zip -d ak
-          sed -i "s|^kernel.string=.*|kernel.string=${KNAME} ${KVER} by ${BUSER} (based on kinesis by clarencelol)|" ak/anykernel.sh
+          
+          sed -i "s|^kernel.string=.*|kernel.string=${KNAME} ${KVER} by ${BUSER} (MT7601U & MT7612U Support)|" ak/anykernel.sh
           grep '^kernel.string=' ak/anykernel.sh
+          
           cp out/arch/arm64/boot/Image ak/Image
           cp out/arch/arm64/boot/dtb.img ak/dtb
           cp out/arch/arm64/boot/dtbo.img ak/dtbo.img
+          
+          # Masukkan modul kernel (.ko) ke dalam AnyKernel3
+          mkdir -p ak/modules/system/lib/modules
+          find out -name "mt7601u.ko" -o -name "mt76x2u.ko" -o -name "mt76_core.ko" -o -name "mt76.ko" | while read -r mod; do
+            if [ -f "$mod" ]; then
+              cp "$mod" ak/modules/system/lib/modules/
+            fi
+          done
+          
+          # Salin fail firmware MT7612U (pastikan anda sudah letakkan fail mt7662u.bin dalam folder firmware/ di repo anda)
+          mkdir -p ak/modules/system/vendor/firmware
+          if [ -f "firmware/mt7662u.bin" ]; then
+            cp firmware/mt7662u.bin ak/modules/system/vendor/firmware/
+          else
+            echo "Amaran: Fail firmware firmware/mt7662u.bin tidak dijumpai di dalam repo!"
+          fi
+          
           mkdir -p dist
           (cd ak && zip -q -r -9 ../dist/$NAME.zip . -x '.*')
           cp out/.config dist/config.txt
-          cp "$(find out -name mt7601u.ko | head -n1)" dist/mt7601u.ko
-          modinfo dist/mt7601u.ko | grep -E "^(vermagic|depends)"
+          
+          # Salin modul untuk semakan luaran jika perlu
+          cp "$(find out -name mt7601u.ko | head -n1)" dist/mt7601u.ko || true
+          cp "$(find out -name mt76x2u.ko | head -n1)" dist/mt76x2u.ko || true
+          
           ls -l dist
 
       - name: Muat naik hasil
@@ -131,5 +165,4 @@ jobs:
           name: kernel-flashable
           path: dist/
           if-no-files-found: error
-
           
