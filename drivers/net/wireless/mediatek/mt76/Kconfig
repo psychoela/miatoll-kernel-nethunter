@@ -1,0 +1,29 @@
+config MT76_CORE
+	tristate
+
+config MT76_USB
+	tristate
+	depends on MT76_CORE
+
+config MT76X2_COMMON
+	tristate
+	depends on MT76_CORE
+
+config MT76X2E
+	tristate "MediaTek MT76X2E (PCIe) support"
+	select MT76_CORE
+	select MT76X2_COMMON
+	depends on MAC80211
+	depends on PCI
+	---help---
+	  This adds support for MT7612/MT7602/MT7662-based wireless PCIe devices.
+
+config MT76X2U
+	tristate "MediaTek MT76X2U (USB) support"
+	select MT76_CORE
+	select MT76_USB
+	select MT76X2_COMMON
+	depends on MAC80211
+	depends on USB
+	help
+	  This adds support for MT7612U-based wireless USB dongles.

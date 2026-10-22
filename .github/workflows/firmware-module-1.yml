@@ -126,15 +126,19 @@ jobs:
           cp_fw mediatek/mt7601u.bin mt7601u.bin mediatek/mt7601u.bin \
             || cp_fw mt7601u.bin mt7601u.bin || true
 
-          echo "=== mt7612u (mt7662u.bin / mt7662.bin) ==="
-          cp_fw mediatek/mt7662u.bin mt7662u.bin mediatek/mt7662u.bin || \
-          cp_fw mediatek/mt7662.bin mt7662.bin mediatek/mt7662.bin || \
-          cp_fw mt7662u.bin mt7662u.bin || \
-          cp_fw mt7662.bin mt7662.bin || echo "WARNING: MT7612U firmware (mt7662u.bin) not found in linux-firmware repo"
+          echo "=== mt7612u (mt7662u.bin + mt7662u_rom_patch.bin) ==="
+          # MT7612U (USB) perlukan DUA fail: firmware utama dan ROM patch.
+          # Letak di /vendor/firmware/ dan /vendor/firmware/mediatek/ supaya kernel jumpa kedua-duanya.
+          cp_fw mediatek/mt7662u.bin mt7662u.bin mediatek/mt7662u.bin \
+            || cp_fw mt7662u.bin mt7662u.bin mediatek/mt7662u.bin \
+            || echo "WARNING: mt7662u.bin not found in linux-firmware repo"
+          cp_fw mediatek/mt7662u_rom_patch.bin mt7662u_rom_patch.bin mediatek/mt7662u_rom_patch.bin \
+            || cp_fw mt7662u_rom_patch.bin mt7662u_rom_patch.bin mediatek/mt7662u_rom_patch.bin \
+            || echo "WARNING: mt7662u_rom_patch.bin not found in linux-firmware repo"
 
           echo "=== Checking required firmware files ==="
           miss=0
-          for need in htc_9271.fw carl9170-1.fw rt2870.bin rt73.bin mt7601u.bin; do
+          for need in htc_9271.fw carl9170-1.fw rt2870.bin rt73.bin mt7601u.bin mt7662u.bin mt7662u_rom_patch.bin; do
             if [ ! -s "$D/$need" ]; then echo "REQUIRED MISSING: $need"; miss=1; fi
           done
           ls "$D"/rtlwifi/rtl8192cufw*.bin > /dev/null 2>&1 || { echo "REQUIRED MISSING: rtlwifi/rtl8192cufw*.bin"; miss=1; }

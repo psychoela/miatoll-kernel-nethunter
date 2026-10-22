@@ -87,26 +87,48 @@ jobs:
           export KBUILD_BUILD_HOST="$BHOST"
           export KBUILD_BUILD_VERSION="$BNUM"
           
-          ARGS="O=out ARCH=arm64 CC=ccache clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
-          
+          # Guna array supaya "ccache clang" kekal sebagai SATU nilai CC.
+          # (Sebelum ini CC=ccache clang tanpa petikan memecah jadi target "clang" -> make gagal)
+          export CCACHE_DIR="$HOME/.ccache"
+          ccache --max-size=2G >/dev/null || true
+          ccache -z >/dev/null || true
+          MARGS=(O=out ARCH=arm64 "CC=ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-)
+
           sed -i '/^[[:space:]]*select MT7601U[[:space:]]*$/d' nethunter/Kconfig
-          make $ARGS ${{ inputs.defconfig }}
-          
-          # Konfigurasi modul: MT7601U (sedia ada) + MT76 core dan MT76X2U (untuk MT7612U)
-          scripts/config --file out/.config -e MODULES -e MODULE_UNLOAD -d MODULE_SIG_FORCE -e MAC80211 -e WLAN_VENDOR_MEDIATEK -m MT7601U -m MT76_CORE -m MT76X2U -m MT76X2_COMMON -d LLVM_POLLY
-          
+          make "${MARGS[@]}" ${{ inputs.defconfig }}
+
+          # Driver MT76 (MT7612U, backport dari 4.19) dibina TERUS ke dalam kernel (=y),
+          # jadi tiada .ko tambahan untuk di-insmod. Hanya aktif jika sumbernya wujud.
+          MT76_SRC=0
+          if [ -d drivers/net/wireless/mediatek/mt76 ]; then MT76_SRC=1; fi
+          echo "MT76_SRC=$MT76_SRC" >> "$GITHUB_ENV"
+
+          # MT7601U kekal sebagai modul; MT76X2U (MT7612U) built-in (select MT76_CORE/USB/COMMON)
+          scripts/config --file out/.config -e MODULES -e MODULE_UNLOAD -d MODULE_SIG_FORCE -e MAC80211 -e WLAN_VENDOR_MEDIATEK -m MT7601U -d LLVM_POLLY
+          if [ "$MT76_SRC" = 1 ]; then
+            scripts/config --file out/.config -e MT76X2U
+          else
+            echo "AMARAN: drivers/net/wireless/mediatek/mt76 tiada -> MT7612U (mt76x2u) dilangkau. Backport driver MT76 diperlukan."
+          fi
+
           scripts/config --file out/.config --set-str LOCALVERSION "-${KNAME}-${KVER}-${KSUFFIX}"
-          make $ARGS olddefconfig
-          
+          make "${MARGS[@]}" olddefconfig
+
           echo "=== Diagnosis Wireless Modules ==="
-          grep -E "CONFIG_MT7601U=|CONFIG_MT76X2U=|CONFIG_MT76_CORE=" out/.config
-          
-          make -k -j$(nproc) $ARGS
-          make -j$(nproc) $ARGS modules
+          grep -E "CONFIG_MT7601U=|CONFIG_MT76X2U=|CONFIG_MT76_CORE=|CONFIG_MT76_USB=|CONFIG_MT76X2_COMMON=" out/.config || true
+          if [ "$MT76_SRC" = 1 ]; then
+            grep -q "^CONFIG_MT76X2U=y" out/.config || { echo "CONFIG_MT76X2U tidak aktif (semak dependensi USB/MAC80211)"; exit 1; }
+          fi
+
+          make -k -j$(nproc) "${MARGS[@]}"
+          make -j$(nproc) "${MARGS[@]}" modules
+          ccache -s || true
           
           # Pastikan fail modul terhasil
           find out -name mt7601u.ko | grep -q . || { echo "mt7601u.ko tidak terhasil"; exit 1; }
-          find out -name mt76x2u.ko | grep -q . || { echo "mt76x2u.ko tidak terhasil"; exit 1; }
+          if [ "$MT76_SRC" = 1 ]; then
+            grep -aq "mt76x2u" out/arch/arm64/boot/Image || { echo "driver mt76x2u tiada dalam Image"; exit 1; }
+          fi
 
       - name: Pack zip flash (AnyKernel3)
         env:
@@ -126,7 +148,8 @@ jobs:
           rm -rf ak && mkdir ak
           unzip -q anykernel-template.zip -d ak
           
-          sed -i "s|^kernel.string=.*|kernel.string=${KNAME} ${KVER} by ${BUSER} (MT7601U & MT7612U Support)|" ak/anykernel.sh
+          if [ "${MT76_SRC:-0}" = 1 ]; then SUPPORT="MT7601U and MT7612U Support"; else SUPPORT="MT7601U Support"; fi
+          sed -i "s|^kernel.string=.*|kernel.string=${KNAME} ${KVER} by ${BUSER} (${SUPPORT})|" ak/anykernel.sh
           grep '^kernel.string=' ak/anykernel.sh
           
           cp out/arch/arm64/boot/Image ak/Image
@@ -135,19 +158,22 @@ jobs:
           
           # Masukkan modul kernel (.ko) ke dalam AnyKernel3
           mkdir -p ak/modules/system/lib/modules
-          find out -name "mt7601u.ko" -o -name "mt76x2u.ko" -o -name "mt76_core.ko" -o -name "mt76.ko" | while read -r mod; do
+          find out -name "mt7601u.ko" | while read -r mod; do
             if [ -f "$mod" ]; then
               cp "$mod" ak/modules/system/lib/modules/
             fi
           done
           
-          # Salin fail firmware MT7612U (pastikan anda sudah letakkan fail mt7662u.bin dalam folder firmware/ di repo anda)
+          # Firmware MT7612U (pilihan): jika ada dalam folder firmware/ repo, sertakan sekali.
+          # Cara biasa: guna modul Magisk "firmware-module" yang membekalkan kedua-dua fail ini.
           mkdir -p ak/modules/system/vendor/firmware
-          if [ -f "firmware/mt7662u.bin" ]; then
-            cp firmware/mt7662u.bin ak/modules/system/vendor/firmware/
-          else
-            echo "Amaran: Fail firmware firmware/mt7662u.bin tidak dijumpai di dalam repo!"
-          fi
+          for fw in mt7662u.bin mt7662u_rom_patch.bin; do
+            if [ -f "firmware/$fw" ]; then
+              cp "firmware/$fw" ak/modules/system/vendor/firmware/
+            else
+              echo "Nota: firmware/$fw tiada dalam repo (guna modul firmware Magisk)."
+            fi
+          done
           
           mkdir -p dist
           (cd ak && zip -q -r -9 ../dist/$NAME.zip . -x '.*')
@@ -155,7 +181,6 @@ jobs:
           
           # Salin modul untuk semakan luaran jika perlu
           cp "$(find out -name mt7601u.ko | head -n1)" dist/mt7601u.ko || true
-          cp "$(find out -name mt76x2u.ko | head -n1)" dist/mt76x2u.ko || true
           
           ls -l dist
 
