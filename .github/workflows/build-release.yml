@@ -1,0 +1,299 @@
+name: build-sigma-357
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build"
+        required: true
+        default: "sigma-357"
+      defconfig:
+        description: "Defconfig (path relative to arch/arm64/configs)"
+        required: true
+        default: "vendor/xiaomi/miatoll_defconfig"
+      kernel_name:
+        description: "Kernel name (letters, digits, dots, hyphens only)"
+        required: true
+        default: "SigmaPhantom"
+      kernel_version:
+        description: "Kernel version (e.g. r1.3)"
+        required: true
+        default: "r1.3"
+      kernel_suffix:
+        description: "Name suffix (default uses a full-width #; a normal # is not allowed)"
+        required: true
+        default: "＃NetHunter"
+      build_number:
+        description: "Build number after # in the banner (e.g. 1)"
+        required: true
+        default: "1"
+      build_user:
+        description: "Builder name in kernel banner (user@host)"
+        required: true
+        default: "PsychoAvy"
+      build_host:
+        description: "Host name in kernel banner (user@host)"
+        required: true
+        default: "github"
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: test
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev cpio zip python3 git ccache libarchive-tools
+
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            out/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Toolchain (Proton clang, suitable for 4.14 kernels)
+        run: git clone --depth=1 https://github.com/kdrag0n/proton-clang $HOME/clang
+
+      - name: Build kernel
+        env:
+          KNAME: ${{ inputs.kernel_name }}
+          KVER: ${{ inputs.kernel_version }}
+          KSUFFIX: ${{ inputs.kernel_suffix }}
+          BNUM: ${{ inputs.build_number }}
+          BUSER: ${{ inputs.build_user }}
+          BHOST: ${{ inputs.build_host }}
+        run: |
+          case "$KSUFFIX" in
+            ""|*[\#\"\'\\\$\`\ ]*)
+              echo "Invalid suffix: do not use a plain #, quotes, \\, \$, backtick or spaces"
+              exit 1;;
+          esac
+          for v in "$KNAME" "$KVER" "$BNUM" "$BUSER" "$BHOST"; do
+            if ! echo "$v" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+              echo "Disallowed characters in: $v (use letters, digits, dots, hyphens only; no #)"
+              exit 1
+            fi
+          done
+          export PATH=$HOME/clang/bin:$PATH
+          export KBUILD_BUILD_USER="$BUSER"
+          export KBUILD_BUILD_HOST="$BHOST"
+          export KBUILD_BUILD_VERSION="$BNUM"
+
+          # Use an array so that "ccache clang" stays ONE CC value.
+          # (Previously CC=ccache clang without quotes split into a "clang" target -> make failed)
+          export CCACHE_DIR="$HOME/.ccache"
+          ccache --max-size=2G >/dev/null || true
+          ccache -z >/dev/null || true
+          MARGS=(O=out ARCH=arm64 "CC=ccache clang" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-)
+
+          sed -i '/^[[:space:]]*select MT7601U[[:space:]]*$/d' nethunter/Kconfig
+          make "${MARGS[@]}" ${{ inputs.defconfig }}
+
+          # MT76 driver (MT7612U, backported from 4.19) is built DIRECTLY into the kernel (=y),
+          # so there is no extra .ko to insmod. Only enabled if the source exists.
+          MT76_SRC=0
+          if [ -d drivers/net/wireless/mediatek/mt76 ]; then MT76_SRC=1; fi
+          echo "MT76_SRC=$MT76_SRC" >> "$GITHUB_ENV"
+
+          # MT7601U stays a module; MT76X2U (MT7612U) is built-in (selects MT76_CORE/USB/COMMON)
+          scripts/config --file out/.config -e MODULES -e MODULE_UNLOAD -d MODULE_SIG_FORCE -e MAC80211 -e WLAN_VENDOR_MEDIATEK -m MT7601U -d LLVM_POLLY
+          if [ "$MT76_SRC" = 1 ]; then
+            scripts/config --file out/.config -e MT76X2U
+          else
+            echo "WARNING: drivers/net/wireless/mediatek/mt76 missing -> MT7612U (mt76x2u) skipped. An MT76 driver backport is required."
+          fi
+
+          scripts/config --file out/.config --set-str LOCALVERSION "-${KNAME}-${KVER}-${KSUFFIX}"
+          make "${MARGS[@]}" olddefconfig
+
+          echo "=== Wireless modules diagnosis ==="
+          grep -E "CONFIG_MT7601U=|CONFIG_MT76X2U=|CONFIG_MT76_CORE=|CONFIG_MT76_USB=|CONFIG_MT76X2_COMMON=" out/.config || true
+          if [ "$MT76_SRC" = 1 ]; then
+            grep -q "^CONFIG_MT76X2U=y" out/.config || { echo "CONFIG_MT76X2U is not enabled (check USB/MAC80211 dependencies)"; exit 1; }
+          fi
+
+          make -k -j$(nproc) "${MARGS[@]}"
+          make -j$(nproc) "${MARGS[@]}" modules
+          ccache -s || true
+
+          # Make sure the module file was produced
+          find out -name mt7601u.ko | grep -q . || { echo "mt7601u.ko was not produced"; exit 1; }
+          if [ "$MT76_SRC" = 1 ]; then
+            grep -aq "mt76x2u" out/arch/arm64/boot/Image || { echo "mt76x2u driver not found in Image"; exit 1; }
+          fi
+
+      - name: Pack flashable zip (AnyKernel3)
+        env:
+          KNAME: ${{ inputs.kernel_name }}
+          KVER: ${{ inputs.kernel_version }}
+          KSUFFIX: ${{ inputs.kernel_suffix }}
+          BUSER: ${{ inputs.build_user }}
+          BHOST: ${{ inputs.build_host }}
+        run: |
+          SUB=$(grep -E '^SUBLEVEL = ' Makefile | awk '{print $3}')
+          NAME="${KNAME}-${KVER}-4_14_${SUB}-miatoll"
+
+          echo "=== Check name in Image ==="
+          grep -a -o -m1 "Linux version 4\.14\.[0-9]*-[A-Za-z0-9._-]*" out/arch/arm64/boot/Image
+          grep -aq "${KNAME}-${KVER}-${KSUFFIX} (${BUSER}@${BHOST})" out/arch/arm64/boot/Image
+
+          rm -rf ak && mkdir ak
+          unzip -q anykernel-template.zip -d ak
+
+          if [ "${MT76_SRC:-0}" = 1 ]; then SUPPORT="MT7601U and MT7612U Support"; else SUPPORT="MT7601U Support"; fi
+          sed -i "s|^kernel.string=.*|kernel.string=${KNAME} ${KVER} by ${BUSER} (${SUPPORT})|" ak/anykernel.sh
+          grep '^kernel.string=' ak/anykernel.sh
+
+          cp out/arch/arm64/boot/Image ak/Image
+          cp out/arch/arm64/boot/dtb.img ak/dtb
+          cp out/arch/arm64/boot/dtbo.img ak/dtbo.img
+
+          # Put kernel modules (.ko) into AnyKernel3
+          mkdir -p ak/modules/system/lib/modules
+          find out -name "mt7601u.ko" | while read -r mod; do
+            if [ -f "$mod" ]; then
+              cp "$mod" ak/modules/system/lib/modules/
+            fi
+          done
+
+          # MT7612U firmware (optional): if present in the repo's firmware/ folder, include it.
+          # Usual way: use a Magisk "firmware-module" that provides both files.
+          mkdir -p ak/modules/system/vendor/firmware
+          for fw in mt7662u.bin mt7662u_rom_patch.bin; do
+            if [ -f "firmware/$fw" ]; then
+              cp "firmware/$fw" ak/modules/system/vendor/firmware/
+            else
+              echo "Note: firmware/$fw not in repo (use a Magisk firmware module)."
+            fi
+          done
+
+          mkdir -p dist
+          (cd ak && zip -q -r -9 ../dist/$NAME.zip . -x '.*')
+          cp out/.config dist/config.txt
+
+          # Copy module for external inspection if needed
+          cp "$(find out -name mt7601u.ko | head -n1)" dist/mt7601u.ko || true
+
+          ls -l dist
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-flashable
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish to release tag test
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KNAME: ${{ inputs.kernel_name }}
+          KVER: ${{ inputs.kernel_version }}
+          KSUFFIX: ${{ inputs.kernel_suffix }}
+          BNUM: ${{ inputs.build_number }}
+          BUSER: ${{ inputs.build_user }}
+          BHOST: ${{ inputs.build_host }}
+          BRANCH: ${{ inputs.branch }}
+          DEFCONFIG: ${{ inputs.defconfig }}
+        run: |
+          export PATH=$HOME/clang/bin:$PATH
+          KREL=$(cat out/include/config/kernel.release)
+          COMMIT=$(git rev-parse HEAD)
+          SHORT=${COMMIT::7}
+          NOW=$(date -u '+%Y-%m-%d %H:%M UTC')
+          CLANG_L=$(clang --version | head -n1)
+          LLD_L=$(ld.lld --version | head -n1)
+          KCOMP=$(sed -n 's/^#define LINUX_COMPILER "\(.*\)"/\1/p' out/include/generated/compile.h)
+
+          row() {
+            sym=$1; label=$2
+            val=$(grep -E "^CONFIG_${sym}=" out/.config | cut -d= -f2 || true)
+            case "$val" in
+              y) echo "| $label | CONFIG_$sym | built-in |" >> notes.md ;;
+              m) echo "| $label | CONFIG_$sym | module |" >> notes.md ;;
+            esac
+          }
+
+          {
+            echo "## ${KNAME} ${KVER} (${BUSER}@${BHOST})"
+            echo
+            echo "### Kernel"
+            echo "- Version: **${KREL}**"
+            echo "- Build number: ${BNUM}"
+            echo "- Target device: miatoll (SM6250/SM7125, e.g. Redmi Note 9 Pro / joyeuse)"
+            echo "- Defconfig: ${DEFCONFIG}"
+            echo "- Branch: ${BRANCH}, commit ${SHORT}"
+            echo "- Build date: ${NOW}"
+            echo "- Builder: ${BUSER}@${BHOST}"
+            echo
+            echo "### Compiler"
+            echo "- Clang: ${CLANG_L}"
+            echo "- Linker: ${LLD_L}"
+            echo "- Compiler string in kernel banner: ${KCOMP}"
+            echo "- Toolchain: Proton clang (kdrag0n/proton-clang), built with ccache"
+            echo
+            echo "### WiFi drivers"
+            echo "| Driver | Config | Type |"
+            echo "|---|---|---|"
+          } > notes.md
+
+          row MAC80211 "mac80211 (stack)"
+          row CFG80211 "cfg80211 (stack)"
+          row MT7601U "MediaTek MT7601U"
+          row MT76X2U "MediaTek MT7612U (mt76x2u)"
+          row RT2800USB "Ralink RT2800 USB (RT5370, RT3070, etc.)"
+          row RT73USB "Ralink RT73 USB"
+          row RT2500USB "Ralink RT2500 USB"
+          row ATH9K_HTC "Atheros AR9271 (ath9k_htc)"
+          row CARL9170 "Atheros AR9170 (carl9170)"
+          row RTL8187 "Realtek RTL8187"
+          row RTL8192CU "Realtek RTL8188CU/8192CU"
+          row RTL8XXXU "Realtek RTL8XXXU"
+          row R8188EU "Realtek RTL8188EU"
+          row ZD1211RW "ZyDAS ZD1211"
+
+          {
+            echo
+            echo "### Other features"
+            echo "| Feature | Config | Type |"
+            echo "|---|---|---|"
+          } >> notes.md
+
+          row WIREGUARD "WireGuard"
+          row PSTORE_RAM "pstore/ramoops (crash logs)"
+
+          {
+            echo
+            echo "### Notes"
+            echo "- MT7601U is a loadable module, included in the zip under system/lib/modules."
+            echo "- MT7612U (mt76x2u) is built into the kernel image; it needs its firmware (mt7662u.bin, mt7662u_rom_patch.bin), provided by a Magisk firmware module unless bundled in the repo's firmware folder."
+            echo
+            echo "### Files"
+            echo "- AnyKernel3 zip (Image, dtb, dtbo, modules): flash via recovery / kernel flasher"
+            echo "- config.txt: .config used for this build"
+            echo "- mt7601u.ko: MT7601U module for manual inspection"
+            echo
+            echo "This is a **test** release; it is deleted and rebuilt every time the workflow runs."
+          } >> notes.md
+
+          cat notes.md
+
+          gh release delete "$RELEASE_TAG" --cleanup-tag --yes || true
+          gh release create "$RELEASE_TAG" dist/* \
+            --target "$COMMIT" \
+            --title "${KNAME} ${KVER} (${BUSER}@${BHOST}) - ${KREL}" \
+            --notes-file notes.md \
+            --prerelease
