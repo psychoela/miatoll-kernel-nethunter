@@ -213,10 +213,7 @@ jobs:
           KREL=$(cat out/include/config/kernel.release)
           COMMIT=$(git rev-parse HEAD)
           SHORT=${COMMIT::7}
-          NOW=$(date -u '+%Y-%m-%d %H:%M UTC')
           CLANG_L=$(clang --version | head -n1)
-          LLD_L=$(ld.lld --version | head -n1)
-          KCOMP=$(sed -n 's/^#define LINUX_COMPILER "\(.*\)"/\1/p' out/include/generated/compile.h)
 
           row() {
             sym=$1; label=$2
@@ -228,22 +225,14 @@ jobs:
           }
 
           {
-            echo "## ${KNAME} ${KVER} (${BUSER}@${BHOST})"
+            echo "## ${KNAME} ${KVER}"
             echo
             echo "### Kernel"
             echo "- Version: **${KREL}**"
-            echo "- Build number: ${BNUM}"
             echo "- Target device: miatoll (SM6250/SM7125, e.g. Redmi Note 9 Pro / joyeuse)"
             echo "- Defconfig: ${DEFCONFIG}"
             echo "- Branch: ${BRANCH}, commit ${SHORT}"
-            echo "- Build date: ${NOW}"
-            echo "- Builder: ${BUSER}@${BHOST}"
-            echo
-            echo "### Compiler"
             echo "- Clang: ${CLANG_L}"
-            echo "- Linker: ${LLD_L}"
-            echo "- Compiler string in kernel banner: ${KCOMP}"
-            echo "- Toolchain: Proton clang (kdrag0n/proton-clang), built with ccache"
             echo
             echo "### WiFi drivers"
             echo "| Driver | Config | Type |"
@@ -286,7 +275,7 @@ jobs:
             echo "- config.txt: .config used for this build"
             echo "- mt7601u.ko: MT7601U module for manual inspection"
             echo
-            echo "This is a **test** release; it is deleted and rebuilt every time the workflow runs."
+            echo "This is a **test** release."
           } >> notes.md
 
           cat notes.md
@@ -294,6 +283,6 @@ jobs:
           gh release delete "$RELEASE_TAG" --cleanup-tag --yes || true
           gh release create "$RELEASE_TAG" dist/* \
             --target "$COMMIT" \
-            --title "${KNAME} ${KVER} (${BUSER}@${BHOST}) - ${KREL}" \
+            --title "${KNAME} ${KVER}" \
             --notes-file notes.md \
             --prerelease
